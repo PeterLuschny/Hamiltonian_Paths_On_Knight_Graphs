@@ -27,29 +27,32 @@
 -- **Dynamic Scheduling:** Using dynamic scheduling in OpenMP helps balance the workload, as some start positions may lead to significantly deeper searches than others.
 */
  
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <vector>
-#include <algorithm>
 #include <omp.h>
-#include <chrono>
-
-using namespace std;
-using u64 = unsigned long long;
+using u64 = std::uint64_t;
 
 // Compiler intrinsics for speed (GCC/Clang)
-#define POPCOUNT(x) __builtin_popcountll(x)
-#define CTZ(x) __builtin_ctzll(x)
+static inline int popcount64(u64 x) { return __builtin_popcountll(x); }
+static inline int ctz64(u64 x) { return __builtin_ctzll(x); }
+static inline bool has_at_most_one_bit(u64 x) {
+    return (x & (x - 1)) == 0;
+}
 
 struct Solver {
     int K, N, V;
     u64 ALL_MASK;
-    u64 neighbors[64];
+    std::array<u64, 64> neighbors{};
 
     Solver(int k, int n) : K(k), N(n), V(k*n) {
         ALL_MASK = (V == 64) ? ~0ULL : ((1ULL << V) - 1ULL);
         
         // Precompute neighbor masks
-        int moves[8][2] = {
+        static constexpr int moves[8][2] = {
             {1,2}, {1,-2}, {-1,2}, {-1,-2},
             {2,1}, {2,-1}, {-2,1}, {-2,-1}
         };
@@ -73,42 +76,38 @@ struct Solver {
     // --- Heuristic Pruning ---
     // Checks if the unvisited subgraph 'rem' can possibly support a path extension.
     inline bool is_valid_state(u64 rem) const {
-        if (POPCOUNT(rem) <= 1) return true;
+        // If 0 or 1 node remains, we can always finish.
+        if (rem == 0 || has_at_most_one_bit(rem)) return true;
 
-        // 1. Degree Check within the unvisited subgraph
         int ends = 0;
         u64 temp_rem = rem;
         
         while (temp_rem) {
-            int v = CTZ(temp_rem);
+            int v = ctz64(temp_rem);
             temp_rem &= temp_rem - 1; 
 
             // Intersection of neighbors and remaining unvisited nodes
             u64 n_rem = neighbors[v] & rem;
-            int d = POPCOUNT(n_rem);
 
-            // If a node has no unvisited neighbors, it is isolated.
-            // Since we established popcount > 1, this is a dead end.
-            if (d == 0) return false; 
-            
-            // Nodes with degree 1 in the unvisited set are potential endpoints.
-            // A simple path can have at most 2 endpoints.
-            // Note: The entry point from the 'visited' set effectively "saves" one endpoint.
-            if (d == 1) {
+            if (n_rem == 0) return false; // Isolated node -> Dead end
+
+            // Degree-1 test.
+            if (has_at_most_one_bit(n_rem)) {
                 ends++;
-                if (ends > 2) return false; 
+                if (ends > 2) return false; // >2 endpoints -> Branching impossible
             }
         }
 
         // 2. Connectivity Check (Bitwise Flood Fill)
-        int start_node = CTZ(rem);
+        // (Standard check ensures the graph isn't split in two)
+        int start_node = ctz64(rem);
         u64 connected = (1ULL << start_node);
         u64 wavefront = connected;
 
         while (wavefront) {
             u64 new_wavefront = 0;
             while (wavefront) {
-                int v = CTZ(wavefront);
+                int v = ctz64(wavefront);
                 wavefront &= wavefront - 1;
                 new_wavefront |= (neighbors[v] & rem);
             }
@@ -120,28 +119,30 @@ struct Solver {
         return (connected & rem) == rem;
     }
 
-    // Backtracking DFS
-    u64 dfs(int current, u64 visited) {
+    // Update DFS to pass 'current'
+    u64 dfs(int current, u64 visited) const {
         if (visited == ALL_MASK) return 1;
 
-        u64 moves_mask = neighbors[current] & ~visited;
-        if (!moves_mask) return 0;
-
-        // Lookahead pruning
         u64 rem = ALL_MASK & ~visited;
+
+        // Cheap dead-end check first (avoids expensive pruning work).
+        u64 moves_mask = neighbors[current] & rem;
+        if (!moves_mask) return 0;
         if (!is_valid_state(rem)) return 0;
 
-        // Warnsdorff's Rule Sorting
+        // Warnsdorff's Rule (Sort by degree) ...
+        // (Rest of the DFS logic remains the same)
+ 
         int candidates[8];
         int degrees[8];
         int count = 0;
 
         while (moves_mask) {
-            int v = CTZ(moves_mask);
+            int v = ctz64(moves_mask);
             moves_mask &= moves_mask - 1;
 
             // Sort by degree in the *remaining* graph minus the node v itself
-            int deg = POPCOUNT(neighbors[v] & rem) - 1; 
+            int deg = popcount64(neighbors[v] & rem);
 
             int i = count;
             while (i > 0 && degrees[i - 1] > deg) {
@@ -177,33 +178,45 @@ struct BoardSym {
 };
 
 void get_canonical(int r, int c, int K, int N, int& out_r, int& out_c, int& orbit) {
-    vector<BoardSym> syms;
-    syms.reserve(8);
-    
-    // D2 Symmetries (Rectangle)
-    syms.push_back({r, c});
-    syms.push_back({K - 1 - r, c});
-    syms.push_back({r, N - 1 - c});
-    syms.push_back({K - 1 - r, N - 1 - c});
+    // Keep this allocation-free: at most 8 symmetries.
+    BoardSym syms[8];
+    int count = 0;
+
+    // D2 symmetries (rectangle)
+    syms[count++] = {r, c};
+    syms[count++] = {K - 1 - r, c};
+    syms[count++] = {r, N - 1 - c};
+    syms[count++] = {K - 1 - r, N - 1 - c};
 
     if (K == N) {
-        // D4 Symmetries (Square)
-        syms.push_back({c, r});
-        syms.push_back({N - 1 - c, K - 1 - r});
-        syms.push_back({c, K - 1 - r});
-        syms.push_back({N - 1 - c, r});
+        // D4 symmetries (square)
+        syms[count++] = {c, r};
+        syms[count++] = {N - 1 - c, K - 1 - r};
+        syms[count++] = {c, K - 1 - r};
+        syms[count++] = {N - 1 - c, r};
     }
 
     BoardSym min_s = syms[0];
-    for (auto& s : syms) {
-        if (s < min_s) min_s = s;
+    for (int i = 1; i < count; i++) {
+        if (syms[i] < min_s) min_s = syms[i];
     }
-    
+
     out_r = min_s.r;
     out_c = min_s.c;
 
-    sort(syms.begin(), syms.end());
-    orbit = unique(syms.begin(), syms.end()) - syms.begin();
+    // orbit = number of unique symmetries
+    int uniq = 0;
+    for (int i = 0; i < count; i++) {
+        bool seen = false;
+        for (int j = 0; j < uniq; j++) {
+            if (syms[i] == syms[j]) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) syms[uniq++] = syms[i];
+    }
+    orbit = uniq;
 }
 
 u64 knight_hamiltonian_paths(int k, int n) {
@@ -211,16 +224,21 @@ u64 knight_hamiltonian_paths(int k, int n) {
     if (k * n > 64) return 0;
 
     bool odd_board = (k * n) % 2 != 0;
-    Solver solver(k, n);
+    const Solver solver(k, n);
     u64 total_directed = 0;
 
-    vector<pair<int, int>> tasks;
+    struct Task {
+        int start_node;
+        int weight;
+    };
+    std::vector<Task> tasks;
+    tasks.reserve(static_cast<size_t>(k) * static_cast<size_t>(n));
 
     for (int r = 0; r < k; r++) {
         for (int c = 0; c < n; c++) {
             int can_r, can_c, orbit;
             get_canonical(r, c, k, n, can_r, can_c, orbit);
-            
+
             if (r == can_r && c == can_c) {
                 // Parity Pruning: On odd boards, path must start on majority color.
                 // Assuming (0,0) is white/majority.
@@ -228,52 +246,51 @@ u64 knight_hamiltonian_paths(int k, int n) {
                     bool is_white = (r + c) % 2 == 0;
                     if (!is_white) continue; 
                 }
-                tasks.push_back({r * n + c, orbit});
+                tasks.push_back(Task{r * n + c, orbit});
             }
         }
     }
 
     #pragma omp parallel for schedule(dynamic) reduction(+:total_directed)
     for (size_t i = 0; i < tasks.size(); i++) {
-        int start_node = tasks[i].first;
-        int weight = tasks[i].second;
+        int start_node = tasks[i].start_node;
+        int weight = tasks[i].weight;
 
-        Solver local_solver(k, n); 
-        u64 paths = local_solver.dfs(start_node, 1ULL << start_node);
-        total_directed += (paths * weight);
+        u64 paths = solver.dfs(start_node, 1ULL << start_node);
+        total_directed += (paths * static_cast<u64>(weight));
     }
 
     return total_directed / 2;
 }
 
 void A(int k, int n) {
-    auto start = chrono::steady_clock::now();
+    auto start = std::chrono::steady_clock::now();
     u64 result = knight_hamiltonian_paths(k, n);
-    auto end = chrono::steady_clock::now();
-    double seconds = chrono::duration<double>(end - start).count();
+    auto end = std::chrono::steady_clock::now();
+    double seconds = std::chrono::duration<double>(end - start).count();
 
-    cout << "A(" << k << "," << n << ") = " << result 
-         << "   \tTime: " << seconds << "s" << endl;
+    std::cout << "A(" << k << "," << n << ") = " << result 
+              << "  \tTime: " << seconds << "s" << std::endl;
 }
 
 void benchmark() {
-        for (int k = 3; k < 12; k++) {
-            for (int n = 3; n < 12; n++) {
-                if (n * k <= 40) { // Limit to manageable sizes
-                    A(k, n);
-                }
+    for (int k = 3; k < 12; k++) {
+        for (int n = 3; n < 12; n++) {
+            if (n * k <= 40) { // Limit to manageable sizes
+                A(k, n);
             }
         }
+    }
 }
 
 int main() {
     omp_set_num_threads(omp_get_max_threads());
 
-    auto start = chrono::steady_clock::now();
+    auto start = std::chrono::steady_clock::now();
     benchmark();
-    auto end = chrono::steady_clock::now();
-    double total_seconds = chrono::duration<double>(end - start).count();
-    cout << "Total Time: " << total_seconds << "s" << endl;
+    auto end = std::chrono::steady_clock::now();
+    double total_seconds = std::chrono::duration<double>(end - start).count();
+    std::cout << "Total Time: " << total_seconds << "s" << std::endl;
 
     return 0;
 }
