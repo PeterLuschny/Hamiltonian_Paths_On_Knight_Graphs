@@ -1,30 +1,64 @@
-// knights.cpp
 // Count undirected Hamiltonian knight paths on k x n chessboards.
 // Uses backtracking DFS with Warnsdorff's rule and advanced pruning techniques.
-// See OEIS A390833.
 //
-// Peter Luschny, compiled from various AI-sources, December 2025
+// Compiled from various AI-sources (vibe coding), Peter Luschny, December 2025
+// See OEIS A390833, but note that this code was **not** used there.
 
 /*
 **Key Optimization Strategies**
 
 1. **Bit-Level Pruning (Degree & Connectivity):**
--- **Degree Heuristic:** Before attempting moves, we analyze the subgraph of unvisited nodes (`rem`). If *any* node is isolated (degree 0) or if *more than two* nodes are dead ends (degree 1), the branch is immediately pruned. This is mathematically necessary for a Hamiltonian path (which can have at most two endpoints) and cuts down the search space drastically.
--- **Degree Cutoff:** The condition `if (ends > 2) return false;` is the "killer heuristic". In Hamiltonian path problems, most branches fail because the path "splinters" the remaining graph into disconnected segments or segments with too many endpoints. Detecting this with `popcount` before running the expensive BFS saves massive time.
--- **Bit-Parallel Flood Fill:** Instead of an array-based queue for connectivity checks, implement a bitwise flood-fill. This leverages bitwise OR operations to propagate connectivity, which is significantly faster for small dense grids (up to 64 nodes) than managing queue pointers. Uses register-based bit-flood (`wavefront |= neighbors[v]`). This stays entirely inside the CPU's general-purpose registers, avoiding L1 cache latency.
+
+-- **Degree Heuristic:** Before attempting moves, we analyze the subgraph of 
+unvisited nodes (`rem`). If *any* node is isolated (degree 0) or if *more than 
+two* nodes are dead ends (degree 1), the branch is immediately pruned. This is
+mathematically necessary for a Hamiltonian path (which can have at most two 
+endpoints) and cuts down the search space drastically.
+
+-- **Degree Cutoff:** The condition `if (ends > 2) return false;` is the "killer 
+heuristic". In Hamiltonian path problems, most branches fail because the path 
+"splinters" the remaining graph into disconnected segments or segments with too 
+many endpoints. Detecting this with `popcount` before running the expensive BFS 
+saves massive time.
+
+-- **Bit-Parallel Flood Fill:** Instead of an array-based queue for connectivity 
+checks, implement a bitwise flood-fill. This leverages bitwise OR operations to 
+propagate connectivity, which is significantly faster for small dense grids (up 
+to 64 nodes) than managing queue pointers. Uses register-based bit-flood 
+(`wavefront |= neighbors[v]`). This stays entirely inside the CPU's general-purpose
+registers, avoiding L1 cache latency.
 
 2. **Symmetry Reduction (Group Theory):**
--- **Symmetry (Square Boards):** The board has 8 symmetries (rotations and reflections). The code identifies the "canonical" start nodes (the smallest lexicographical index in their orbit) and only runs the expensive DFS for these. The result is then multiplied by the orbit size (1, 2, 4, or 8). This yields an **~8x speedup** for square boards.
--- **Symmetry (Rectangular Boards):** It correctly identifies the 4 symmetries (Identity, 180° rotation, Horizontal/Vertical flips), yielding a **~4x speedup**.
--- **Parity Pruning:** On odd boards the start and end of a Hamiltonian path *must* be on the majority color. This instantly prunes half of the possible start nodes.
+
+-- **Symmetry (Square Boards):** The board has 8 symmetries (rotations and 
+reflections). The code identifies the "canonical" start nodes (the smallest 
+lexicographical index in their orbit) and only runs the expensive DFS for these. 
+The result is then multiplied by the orbit size (1, 2, 4, or 8). This yields an 
+**~8x speedup** for square boards.
+
+-- **Symmetry (Rectangular Boards):** It correctly identifies the 4 symmetries 
+(Identity, 180° rotation, Horizontal/Vertical flips), yielding a **~4x speedup**.
+
+-- **Parity Pruning:** On odd boards the start and end of a Hamiltonian path *must* 
+be on the majority color. This instantly prunes half of the possible start nodes.
 
 3. **Memory & Structure:**
--- **Stack Allocation:** Critical arrays (neighbors, candidates) are allocated on the stack or in fixed-size structs to prevent heap fragmentation and pointer chasing.
--- **Lookahead Sorting (Warnsdorff’s Rule):** Moves are dynamically sorted so that the most constrained neighbors (lowest degree in `rem`) are visited first. This forces "hard" decisions early, leading to faster cutoffs.
+
+-- **Stack Allocation:** Critical arrays (neighbors, candidates) are allocated on
+the stack or in fixed-size structs to prevent heap fragmentation and pointer chasing.
+
+-- **Lookahead Sorting (Warnsdorff’s Rule):** Moves are dynamically sorted so 
+that the most constrained neighbors (lowest degree in `rem`) are visited first. 
+This forces "hard" decisions early, leading to faster cutoffs.
 
 4. **Parallelization:**
--- **OpenMP:** The outer loop over canonical start positions is parallelized using OpenMP. This is an embarrassingly parallel problem since each start position's DFS is independent. The reduction clause efficiently aggregates results.
--- **Dynamic Scheduling:** Using dynamic scheduling in OpenMP helps balance the workload, as some start positions may lead to significantly deeper searches than others.
+
+-- **OpenMP:** The outer loop over canonical start positions is parallelized using 
+OpenMP. This is an embarrassingly parallel problem since each start position's 
+DFS is independent. The reduction clause efficiently aggregates results.
+
+-- **Dynamic Scheduling:** Using dynamic scheduling in OpenMP helps balance the 
+workload, as some start positions may lead to significantly deeper searches than others.
 */
  
 #include <algorithm>
@@ -51,7 +85,7 @@ struct Solver {
     Solver(int k, int n) : K(k), N(n), V(k*n) {
         ALL_MASK = (V == 64) ? ~0ULL : ((1ULL << V) - 1ULL);
         
-        // Precompute neighbor masks
+        // Precompute neighbor masks for the knight graph
         static constexpr int moves[8][2] = {
             {1,2}, {1,-2}, {-1,2}, {-1,-2},
             {2,1}, {2,-1}, {-2,1}, {-2,-1}
@@ -74,14 +108,19 @@ struct Solver {
     }
 
     // --- Heuristic Pruning ---
-    // Checks if the unvisited subgraph 'rem' can possibly support a path extension.
+    // Checks if the unvisited subgraph 'rem' can possibly support a Hamiltonian path.
+    // 1. No node can have degree 0 (isolated).
+    // 2. At most 2 nodes can have degree 1 (endpoints).
+    // 3. The subgraph must be connected.
     inline bool is_valid_state(u64 rem) const {
         // If 0 or 1 node remains, we can always finish.
         if (rem == 0 || has_at_most_one_bit(rem)) return true;
 
+        // 1. Degree Check
         int ends = 0;
         u64 temp_rem = rem;
-        
+
+        // Iterate over set bits in rem
         while (temp_rem) {
             int v = ctz64(temp_rem);
             temp_rem &= temp_rem - 1; 
@@ -99,18 +138,21 @@ struct Solver {
         }
 
         // 2. Connectivity Check (Bitwise Flood Fill)
-        // (Standard check ensures the graph isn't split in two)
+        // Pick the first node in rem as seed
         int start_node = ctz64(rem);
         u64 connected = (1ULL << start_node);
         u64 wavefront = connected;
 
         while (wavefront) {
             u64 new_wavefront = 0;
+            // Iterate bits in current wavefront
             while (wavefront) {
                 int v = ctz64(wavefront);
                 wavefront &= wavefront - 1;
+                // Expand to unvisited neighbors
                 new_wavefront |= (neighbors[v] & rem);
             }
+            // Remove already visited from new wavefront to avoid cycles/redundancy
             new_wavefront &= ~connected;
             connected |= new_wavefront;
             wavefront = new_wavefront;
@@ -131,8 +173,6 @@ struct Solver {
         if (!is_valid_state(rem)) return 0;
 
         // Warnsdorff's Rule (Sort by degree) ...
-        // (Rest of the DFS logic remains the same)
- 
         int candidates[8];
         int degrees[8];
         int count = 0;
@@ -183,19 +223,19 @@ void get_canonical(int r, int c, int K, int N, int& out_r, int& out_c, int& orbi
     int count = 0;
 
     // D2 symmetries (rectangle)
-    syms[count++] = {r, c};
-    syms[count++] = {K - 1 - r, c};
-    syms[count++] = {r, N - 1 - c};
-    syms[count++] = {K - 1 - r, N - 1 - c};
+    syms[count++] = {r, c};                  // 1. Identity
+    syms[count++] = {K - 1 - r, c};          // 2. Reflect Vertical (across mid-row)
+    syms[count++] = {r, N - 1 - c};          // 3. Reflect Horizontal (across mid-col)
+    syms[count++] = {K - 1 - r, N - 1 - c};  // 4. Rotate 180
 
-    if (K == N) {
-        // D4 symmetries (square)
-        syms[count++] = {c, r};
-        syms[count++] = {N - 1 - c, K - 1 - r};
-        syms[count++] = {c, K - 1 - r};
-        syms[count++] = {N - 1 - c, r};
+    if (K == N) {  // D4 symmetries (square)
+        syms[count++] = {c, r};                  // 5. Transpose (Main Diag)
+        syms[count++] = {N - 1 - c, K - 1 - r};  // 6. Anti-Transpose (Anti Diag)
+        syms[count++] = {c, K - 1 - r};          // 7. Rot 90 CW
+        syms[count++] = {N - 1 - c, r};          // 8. Rot 270 CW
     }
 
+    // Find canonical (min)
     BoardSym min_s = syms[0];
     for (int i = 1; i < count; i++) {
         if (syms[i] < min_s) min_s = syms[i];
@@ -204,6 +244,7 @@ void get_canonical(int r, int c, int K, int N, int& out_r, int& out_c, int& orbi
     out_r = min_s.r;
     out_c = min_s.c;
 
+    // Count distinct symmetries (Orbit size)
     // orbit = number of unique symmetries
     int uniq = 0;
     for (int i = 0; i < count; i++) {
@@ -220,13 +261,26 @@ void get_canonical(int r, int c, int K, int N, int& out_r, int& out_c, int& orbi
 }
 
 u64 knight_hamiltonian_paths(int k, int n) {
-    if (k > n) std::swap(k, n);
-    if (k * n > 64) return 0;
+    if (k > n) std::swap(k, n); // Ensure k <= n
+    if (k * n > 64) {
+        std::cerr << "Error: Board too large for 64-bit mask implementation.\n";
+        return 0;
+    }
 
+    // Pruning: Parity Check
+    // On an odd-sized board, start and end must be the SAME color (Majority).
+    // On an even-sized board, start and end must be DIFFERENT colors.
+    // If the board is odd, we can only start on the majority color.
+    // However, undirected paths allow A->B (start min, end maj).
+    // But Hamiltonian path on odd graph MUST start/end on Majority.
+    // (Majority count = Minority + 1. Path alternates. M-m-M-m...-M).
+    // So if we pick a start node on Minority color on an Odd board, count is 0.
     bool odd_board = (k * n) % 2 != 0;
     const Solver solver(k, n);
     u64 total_directed = 0;
 
+    // We collect tasks: (start_node, orbit_size)
+    // to parallelize over canonical start nodes.
     struct Task {
         int start_node;
         int weight;
@@ -239,10 +293,15 @@ u64 knight_hamiltonian_paths(int k, int n) {
             int can_r, can_c, orbit;
             get_canonical(r, c, k, n, can_r, can_c, orbit);
 
+            // Only process if current is the canonical representative
             if (r == can_r && c == can_c) {
                 // Parity Pruning: On odd boards, path must start on majority color.
                 // Assuming (0,0) is white/majority.
                 if (odd_board) {
+                    // We just need to know if it's the minority color.
+                    // White squares = ceil(V/2), Black = floor(V/2).
+                    // If V is odd, White is Majority.
+                    // If (r+c)%2 != 0, it's Black (Minority). Impossible to start path here.
                     bool is_white = (r + c) % 2 == 0;
                     if (!is_white) continue; 
                 }
@@ -262,6 +321,8 @@ u64 knight_hamiltonian_paths(int k, int n) {
 
     return total_directed / 2;
 }
+
+// --- Driver & Benchmarking ---
 
 void A(int k, int n) {
     auto start = std::chrono::steady_clock::now();
@@ -295,51 +356,9 @@ int main() {
     return 0;
 }
 
-/*
-A(3,3) = 0      Time: 0.0040712s
-A(3,4) = 8      Time: 3.25e-05s
-A(3,5) = 0      Time: 1.14e-05s
-A(3,6) = 0      Time: 2.31e-05s
-A(3,7) = 52     Time: 8.47e-05s
-A(3,8) = 396    Time: 0.000403s
-A(3,9) = 560    Time: 0.0009808s
-A(3,10) = 3048  Time: 0.0041568s
-A(3,11) = 10672 Time: 0.0189267s
-A(4,3) = 8      Time: 0.000235s
-A(4,4) = 0      Time: 3.51e-05s
-A(4,5) = 82     Time: 0.0027262s
-A(4,6) = 744    Time: 0.0119047s
-A(4,7) = 6378   Time: 0.0185291s
-A(4,8) = 31088  Time: 0.140034s
-A(4,9) = 189688 Time: 1.00172s
-A(4,10) = 1213112 Time: 7.46396s
-A(5,3) = 0      Time: 0.0033393s
-A(5,4) = 82     Time: 0.0020133s
-A(5,5) = 864    Time: 0.005744s
-A(5,6) = 18784  Time: 0.0384103s
-A(5,7) = 622868 Time: 1.06086s
-A(5,8) = 18061054 Time: 27.3598s
-A(6,3) = 0      Time: 0.0001351s
-A(6,4) = 744    Time: 0.0015218s
-A(6,5) = 18784  Time: 0.0281101s
-A(6,6) = 3318960 Time: 2.82377s
-A(7,3) = 52     Time: 9.22e-05s
-A(7,4) = 6378   Time: 0.0135029s
-A(7,5) = 622868 Time: 1.01951s
-A(8,3) = 396    Time: 0.0003808s
-A(8,4) = 31088  Time: 0.100319s
-A(8,5) = 18061054 Time: 27.9002s
-A(9,3) = 560    Time: 0.0008884s
-A(9,4) = 189688 Time: 0.831437s
-A(10,3) = 3048  Time: 0.004737s
-A(10,4) = 1213112 Time: 7.21754s
-A(11,3) = 10672 Time: 0.0163133s
-Total Time: 77.0983s
-*/
-
-/*
+/*  Makefile commands to compile and run:
 sudo pacman -Syu
 sudo pacman -S gcc clang make cmake libomp
-g++ -O3 -march=native -fopenmp -std=c++17 knights.cpp -o knights
+g++ -O3 -march=native -fopenmp -std=c++20 knights.cpp -o knights
 ./knights
 */
