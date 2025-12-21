@@ -1,16 +1,23 @@
-# Hamiltonian_Paths_On_Knight_Graphs
+# Hamiltonian Paths on Knight Graphs
 
-Count undirected Hamiltonian knight paths on k x n chessboards.
+Count undirected Hamiltonian knight paths on k x n chessboards. See OEIS A390833.
 
-Uses backtracking DFS with Warnsdorff's rule and advanced pruning techniques.
+Uses backtracking DFS with Warnsdorff's rule and advanced pruning techniques. 
 
-See OEIS A390833.
+Make: g++ -O3 -march=native -fopenmp -std=c++20 knights.cpp -o knights
 
-Make:
+# The challenge
+ 
+Let's turn this into a little challenge! The benchmark is:
+```
+    // Limit to manageable sizes
+    for (k = 3; k < 12; k++) 
+       for (n = 3; n < 12; n++) 
+          if (n * k <= 40) A390833(k, n);
+```
+To keep the code simple and clear, we also require < 200 lines of code (not counting comment lines).
 
-sudo pacman -S gcc clang make cmake libomp
-
-g++ -O3 -march=native -fopenmp -std=c++20 knights.cpp -o knights
+Who can improve the following runtimes? (Measured on a standard 2016 laptop).
 
 
 | Board | Paths | Time (s) |
