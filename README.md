@@ -11,7 +11,7 @@ Make: g++ -O3 -march=native -fopenmp -std=c++20 knights.cpp -o knights
 Let's turn this into a little challenge! 
 
 
-![Challenge](FightingKnights.pgn)
+![Challenge](https://github.com/PeterLuschny/Hamiltonian_Paths_On_Knight_Graphs/blob/main/FightingKnights.png)
 
 
 The benchmark is:
