@@ -80,12 +80,12 @@ static inline bool has_at_most_one_bit(u64 x) {
 struct Solver {
     int K, N, V;
     u64 ALL_MASK;
-    std::array<u64, 64> neighbors{};
+    // Align to 64 bytes to match cache line size, preventing cache line splits.
+    alignas(64) std::array<u64, 64> neighbors{};
 
     Solver(int k, int n) : K(k), N(n), V(k*n) {
         ALL_MASK = (V == 64) ? ~0ULL : ((1ULL << V) - 1ULL);
         
-        // Precompute neighbor masks for the knight graph
         static constexpr int moves[8][2] = {
             {1,2}, {1,-2}, {-1,2}, {-1,-2},
             {2,1}, {2,-1}, {-2,1}, {-2,-1}
@@ -107,52 +107,42 @@ struct Solver {
         }
     }
 
-    // --- Heuristic Pruning ---
-    // Checks if the unvisited subgraph 'rem' can possibly support a Hamiltonian path.
-    // 1. No node can have degree 0 (isolated).
-    // 2. At most 2 nodes can have degree 1 (endpoints).
-    // 3. The subgraph must be connected.
+    // Heuristic Pruning: Degree checks & Connectivity
     inline bool is_valid_state(u64 rem) const {
-        // If 0 or 1 node remains, we can always finish.
         if (rem == 0 || has_at_most_one_bit(rem)) return true;
 
-        // 1. Degree Check
         int ends = 0;
         u64 temp_rem = rem;
 
-        // Iterate over set bits in rem
         while (temp_rem) {
             int v = ctz64(temp_rem);
             temp_rem &= temp_rem - 1; 
-
-            // Intersection of neighbors and remaining unvisited nodes
+            
+            // Check neighbors within unvisited set
             u64 n_rem = neighbors[v] & rem;
+            
+            // Optimization: Zero neighbors = Isolated = Fail
+            if (n_rem == 0) return false;
 
-            if (n_rem == 0) return false; // Isolated node -> Dead end
-
-            // Degree-1 test.
+            // Optimization: One neighbor = Endpoint
             if (has_at_most_one_bit(n_rem)) {
                 ends++;
-                if (ends > 2) return false; // >2 endpoints -> Branching impossible
+                if (ends > 2) return false; 
             }
         }
 
-        // 2. Connectivity Check (Bitwise Flood Fill)
-        // Pick the first node in rem as seed
+        // Connectivity Check (Bit-Flood)
         int start_node = ctz64(rem);
         u64 connected = (1ULL << start_node);
         u64 wavefront = connected;
 
         while (wavefront) {
             u64 new_wavefront = 0;
-            // Iterate bits in current wavefront
             while (wavefront) {
                 int v = ctz64(wavefront);
                 wavefront &= wavefront - 1;
-                // Expand to unvisited neighbors
                 new_wavefront |= (neighbors[v] & rem);
             }
-            // Remove already visited from new wavefront to avoid cycles/redundancy
             new_wavefront &= ~connected;
             connected |= new_wavefront;
             wavefront = new_wavefront;
@@ -161,29 +151,41 @@ struct Solver {
         return (connected & rem) == rem;
     }
 
-    // Update DFS to pass 'current'
+    // DFS with Forced Move Pruning
     u64 dfs(int current, u64 visited) const {
         if (visited == ALL_MASK) return 1;
 
         u64 rem = ALL_MASK & ~visited;
-
-        // Cheap dead-end check first (avoids expensive pruning work).
         u64 moves_mask = neighbors[current] & rem;
+        
+        // 1. Immediate Dead-End Check
         if (!moves_mask) return 0;
+        
+        // 2. Global Validity Check
         if (!is_valid_state(rem)) return 0;
 
-        // Warnsdorff's Rule (Sort by degree) ...
         int candidates[8];
         int degrees[8];
         int count = 0;
+        int forced_move = -1;
 
+        // 3. Move Generation & Forced Move Detection
         while (moves_mask) {
             int v = ctz64(moves_mask);
             moves_mask &= moves_mask - 1;
 
-            // Sort by degree in the *remaining* graph minus the node v itself
+            // Calculate degree in the remaining graph (lookahead)
             int deg = popcount64(neighbors[v] & rem);
 
+            // Critical optimization: Forced Move
+            // If 'v' has 0 neighbors in 'rem', it is a leaf attached only to 'current'.
+            // We *must* visit it now, otherwise it becomes isolated.
+            if (deg == 0) {
+                if (forced_move != -1) return 0; // Two forced moves -> Impossible (fork)
+                forced_move = v;
+            }
+
+            // Insertion Sort (Warnsdorff's Rule)
             int i = count;
             while (i > 0 && degrees[i - 1] > deg) {
                 degrees[i] = degrees[i - 1];
@@ -195,6 +197,13 @@ struct Solver {
             count++;
         }
 
+        // 4. Execution
+        // If a forced move exists, ignore all other candidates.
+        if (forced_move != -1) {
+            return dfs(forced_move, visited | (1ULL << forced_move));
+        }
+
+        // Otherwise, recurse on sorted candidates
         u64 total_paths = 0;
         for (int i = 0; i < count; i++) {
             total_paths += dfs(candidates[i], visited | (1ULL << candidates[i]));
@@ -324,7 +333,7 @@ u64 knight_hamiltonian_paths(int k, int n) {
 
 // --- Driver & Benchmarking ---
 
-void A(int k, int n) {
+void A390833(int k, int n) {
     auto start = std::chrono::steady_clock::now();
     u64 result = knight_hamiltonian_paths(k, n);
     auto end = std::chrono::steady_clock::now();
@@ -338,7 +347,7 @@ void benchmark() {
     for (int k = 3; k < 12; k++) {
         for (int n = 3; n < 12; n++) {
             if (n * k <= 40) { // Limit to manageable sizes
-                A(k, n);
+                A390833(k, n);
             }
         }
     }
