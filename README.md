@@ -11,7 +11,7 @@ Make: g++ -O3 -march=native -fopenmp -std=c++20 knights.cpp -o knights
 Let's turn this into a little challenge! 
 
 
-![Challenge](pictures/FightingKnights.pgn)
+![Challenge](FightingKnights.pgn)
 
 
 The benchmark is:
