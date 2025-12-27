@@ -1,6 +1,6 @@
 # Hamiltonian Paths on Knight Graphs
 
-Count undirected Hamiltonian knight paths on k x n chessboards. See OEIS A390833.
+Count undirected Hamiltonian knight paths on k x n chessboards. See OEIS A390833 and A392000.
 
 Uses backtracking DFS with Warnsdorff's rule and advanced pruning techniques.
 
@@ -25,7 +25,7 @@ To keep the code simple and clear, we also require < 300 lines of code (not coun
 
 Can you improve the following runtimes? (Times measured on a standard laptop).
 
-| Board  | Paths    | Time (s)  | Cycles | Time (s)   |
+| Board  | Paths<br>A390833| Time (s)  | Cycles<br>A392000| Time (s)   |
 |---     |---:      |---:       |---:    |---:        |
 | A(3,3) | 0        | 0.0051301 | 0      | 6e-07      |
 | A(3,4) | 8        | 3.2e-05   | 0      | 0.0051886  |
